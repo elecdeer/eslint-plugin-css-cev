@@ -1,16 +1,24 @@
 {
   "name": "eslint-plugin-css-cev",
   "version": "0.0.0",
-  "description": "A starter for creating a TypeScript package.",
-  "homepage": "https://github.com/author/library#readme",
+  "description": "ESLint plugin enforcing the CEV (Component / Element / Variant) CSS architecture for @eslint/css",
+  "keywords": [
+    "cev",
+    "css",
+    "css-modules",
+    "eslint",
+    "eslint-plugin",
+    "rscss"
+  ],
+  "homepage": "https://github.com/elecdeer/eslint-plugin-css-cev#readme",
   "bugs": {
-    "url": "https://github.com/author/library/issues"
+    "url": "https://github.com/elecdeer/eslint-plugin-css-cev/issues"
   },
   "license": "MIT",
-  "author": "Author Name <author.name@mail.com>",
+  "author": "elecdeer <dev@elecdeer.dev>",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/author/library.git"
+    "url": "git+https://github.com/elecdeer/eslint-plugin-css-cev.git"
   },
   "files": [
     "dist"
@@ -32,10 +40,18 @@
     "prepare": "vp config"
   },
   "devDependencies": {
+    "@eslint/core": "^1.2.1",
+    "@eslint/css": "^1.4.0",
+    "@eslint/css-tree": "^4.0.4",
     "@types/node": "^26.1.1",
     "bumpp": "^11.1.0",
+    "eslint": "^10.7.0",
     "typescript": "^7.0.2",
     "vite-plus": "catalog:"
+  },
+  "peerDependencies": {
+    "@eslint/css": ">=1.0.0",
+    "eslint": ">=9.15.0"
   },
   "packageManager": "pnpm@11.13.1"
 }
