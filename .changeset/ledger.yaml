@@ -2,3 +2,7 @@ eslint-plugin-css-cev@0.1.0:
   dir: ""
   intents:
     - old-crabs-smoke
+eslint-plugin-css-cev@0.1.1:
+  dir: ""
+  intents:
+    - strong-keys-tell
