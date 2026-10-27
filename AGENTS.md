@@ -29,3 +29,9 @@ release. Add a tool name to select part of the graph. For example, run
 - [ ] If setup, runtime, or package-manager behavior looks wrong, run `vp env doctor` and include its output when asking for help.
 
 <!--VITE PLUS END-->
+
+## Release
+
+- Versioning uses pnpm's built-in release management (`pnpm change` / `pnpm version -r`), not the Changesets CLI.
+- For any change that affects the published package, record a change intent before pushing: `pnpm change --bump <patch|minor|major> --summary "<changelog entry>" eslint-plugin-css-cev`.
+- On push to `main`, `.github/workflows/release.yml` opens/updates the `release/next` PR from pending intents; merging it publishes to npm via Trusted Publishing.
