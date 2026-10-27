@@ -1,0 +1,140 @@
+name: Release
+
+# main への push ごとに、pending な change intent (pnpm change) があればリリース PR を作成・更新し、
+# なければ未公開のバージョンを npm に publish する。
+on:
+  push:
+    branches: ["main"]
+  workflow_dispatch:
+
+permissions: {}
+
+# リリース PR の更新や publish が並行して走らないよう、キャンセルせず直列に実行する
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+env:
+  RELEASE_BRANCH: release/next
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write # リリースブランチへの push
+      pull-requests: write # リリース PR の作成・更新
+    outputs:
+      should-publish: ${{ steps.publish-check.outputs.should-publish }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: voidzero-dev/setup-vp@cab1ab9eaff52d4857875f4f2c016e36af8f2c76 # v1.22.0
+
+      # pnpm version -r は intent を消費すると status から消えるため、PR 本文用に先に取得しておく
+      - name: Get release plan
+        id: plan
+        run: |
+          {
+            echo "plan<<EOF"
+            pnpm change status
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Apply change intents
+        id: apply
+        run: |
+          pnpm version -r
+          # `--bump none` の intent だけでも intent ファイルの削除で差分が出るため、
+          # working tree 全体ではなく package.json の変更 (= バージョンが上がったか) で判定する
+          if ! git diff --quiet -- ':(glob)**/package.json'; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create or update release PR
+        if: steps.apply.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_PLAN: ${{ steps.plan.outputs.plan }}
+        run: |
+          # checkout では認証情報を残さず、push するこのステップでのみ gh の credential helper を使う
+          gh auth setup-git
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git switch -C "$RELEASE_BRANCH"
+          git add -A
+          # pre-commit フック (vp staged) は CI では不要なので --no-verify
+          git commit --no-verify -m "chore: release packages"
+          git push --force origin "$RELEASE_BRANCH"
+
+          BODY=$(printf '%s\n\n```\n%s\n```\n' "このPRをマージすると npm に publish されます。" "$RELEASE_PLAN")
+          PR_NUMBER=$(gh pr list --head "$RELEASE_BRANCH" --state open --json number --jq '.[0].number // empty')
+          if [ -n "$PR_NUMBER" ]; then
+            gh pr edit "$PR_NUMBER" --body "$BODY"
+          else
+            gh pr create --base main --head "$RELEASE_BRANCH" --title "chore: release packages" --body "$BODY"
+            PR_NUMBER=$(gh pr list --head "$RELEASE_BRANCH" --state open --json number --jq '.[0].number // empty')
+          fi
+
+          {
+            echo "## Release PR"
+            echo "#$PR_NUMBER を作成・更新しました。"
+            echo '```'
+            echo "$RELEASE_PLAN"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # pnpm version -r で作られた (ledger に記録された) バージョンだけを publish 対象にする。
+      # 初期バージョンなど ledger にないバージョンを CI が勝手に publish しないようにするため。
+      - name: Check whether to publish
+        id: publish-check
+        if: steps.apply.outputs.changed == 'false'
+        run: |
+          NAME=$(jq -r '.name' package.json)
+          VERSION=$(jq -r '.version' package.json)
+          SHOULD_PUBLISH=false
+          if grep -qF "$NAME@$VERSION:" .changeset/ledger.yaml 2>/dev/null; then
+            PUBLISHED=$(pnpm view "$NAME@$VERSION" version 2>/dev/null || true)
+            if [ -z "$PUBLISHED" ]; then
+              SHOULD_PUBLISH=true
+            fi
+          fi
+          echo "should-publish=$SHOULD_PUBLISH" >> "$GITHUB_OUTPUT"
+          echo "## Publish check" >> "$GITHUB_STEP_SUMMARY"
+          echo "\`$NAME@$VERSION\`: should-publish=$SHOULD_PUBLISH" >> "$GITHUB_STEP_SUMMARY"
+
+  publish:
+    needs: version
+    if: needs.version.outputs.should-publish == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # id-token はこのジョブにだけ付与する (Trusted Publishing 用)
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # キャッシュ汚染を避けるため publish ジョブでは依存キャッシュを使わない
+      - uses: voidzero-dev/setup-vp@cab1ab9eaff52d4857875f4f2c016e36af8f2c76 # v1.22.0
+
+      # ビルドは prepublishOnly で実行される。Trusted Publishing では provenance が自動で付与される
+      - name: Publish
+        run: pnpm -r publish --report-summary
+
+      - name: Report published packages
+        if: always()
+        run: |
+          echo "## Published packages" >> "$GITHUB_STEP_SUMMARY"
+          if [ -f pnpm-publish-summary.json ]; then
+            jq -r '.publishedPackages[] | "- `\(.name)@\(.version)`"' pnpm-publish-summary.json >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "(none)" >> "$GITHUB_STEP_SUMMARY"
+          fi
