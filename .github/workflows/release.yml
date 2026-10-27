@@ -1,7 +1,20 @@
 name: Release
 
-# main への push ごとに、pending な change intent (pnpm change) があればリリース PR を作成・更新し、
-# なければ未公開のバージョンを npm に publish する。
+# リリースフロー (pnpm ネイティブの change intent を利用):
+#   1. 変更時に `pnpm change` で .changeset/ に intent を記録してマージする
+#   2. main に未消費の intent があると、このワークフローが `pnpm version -r` を
+#      適用した Release PR (release/main ブランチ) を作成/更新する
+#   3. Release PR をマージすると、このワークフローが npm へ OIDC (trusted
+#      publishing) 経由で `pnpm stage publish` を実行し、git タグと GitHub
+#      Release を作成する
+#   4. `pnpm stage publish` はステージング登録のみを行い 2FA を要求しない。
+#      実際に npm 上で公開されるには、メンテナが npmjs.com またはローカル
+#      CLI (`pnpm stage approve`) で 2FA 認証込みの承認を行う必要がある。
+#
+# 注意: 初回 publish は npm の仕様上 OIDC では行えないため手動で行うこと。
+# 以降は npmjs.com のパッケージ設定で Trusted Publisher (このリポジトリ +
+# release.yml) を登録しておくこと。
+
 on:
   push:
     branches: ["main"]
@@ -9,40 +22,41 @@ on:
 
 permissions: {}
 
-# リリース PR の更新や publish が並行して走らないよう、キャンセルせず直列に実行する
+# Release PR の更新と publish が並行しないよう直列化する (キャンセルはしない)
 concurrency:
   group: ${{ github.workflow }}
   cancel-in-progress: false
 
 env:
-  RELEASE_BRANCH: release/next
+  RELEASE_BRANCH: release/main
 
 jobs:
   version:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
-      contents: write # リリースブランチへの push
-      pull-requests: write # リリース PR の作成・更新
+      contents: write # release/main ブランチへの push
+      pull-requests: write # Release PR の作成・更新
     outputs:
       should-publish: ${{ steps.publish-check.outputs.should-publish }}
+      name: ${{ steps.publish-check.outputs.name }}
+      version: ${{ steps.publish-check.outputs.version }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
+      # キャッシュ汚染を避けるため release ワークフローでは依存キャッシュを使わない
       - uses: voidzero-dev/setup-vp@cab1ab9eaff52d4857875f4f2c016e36af8f2c76 # v1.22.0
+        with:
+          node-version: "26"
+          # frozen-lockfile 付きで明示的にインストールするため、自動インストールは無効化する
+          run-install: false
 
-      # pnpm version -r は intent を消費すると status から消えるため、PR 本文用に先に取得しておく
-      - name: Get release plan
-        id: plan
-        run: |
-          {
-            echo "plan<<EOF"
-            pnpm change status
-            echo "EOF"
-          } >> "$GITHUB_OUTPUT"
+      - name: Install dependencies
+        run: vp install --frozen-lockfile
 
+      # intent を消費して version bump + changelog 生成 + ledger 記録を行う
       - name: Apply change intents
         id: apply
         run: |
@@ -59,34 +73,39 @@ jobs:
         if: steps.apply.outputs.changed == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
-          RELEASE_PLAN: ${{ steps.plan.outputs.plan }}
         run: |
           # checkout では認証情報を残さず、push するこのステップでのみ gh の credential helper を使う
           gh auth setup-git
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
+          VERSION=$(jq -r '.version' package.json)
+          NAME=$(jq -r '.name' package.json)
+          TITLE="chore: release v$VERSION"
+
           git switch -C "$RELEASE_BRANCH"
           git add -A
           # pre-commit フック (vp staged) は CI では不要なので --no-verify
-          git commit --no-verify -m "chore: release packages"
+          git commit --no-verify -m "$TITLE"
           git push --force origin "$RELEASE_BRANCH"
 
-          BODY=$(printf '%s\n\n```\n%s\n```\n' "このPRをマージすると npm に publish されます。" "$RELEASE_PLAN")
+          BODY_FILE=$(mktemp)
+          {
+            echo "このPRをマージすると v$VERSION が npm にステージング登録されます。"
+            echo
+            cat ".changeset/changelogs/$NAME@$VERSION.md"
+          } > "$BODY_FILE"
+
           PR_NUMBER=$(gh pr list --head "$RELEASE_BRANCH" --state open --json number --jq '.[0].number // empty')
           if [ -n "$PR_NUMBER" ]; then
-            gh pr edit "$PR_NUMBER" --body "$BODY"
+            gh pr edit "$PR_NUMBER" --title "$TITLE" --body-file "$BODY_FILE"
           else
-            gh pr create --base main --head "$RELEASE_BRANCH" --title "chore: release packages" --body "$BODY"
-            PR_NUMBER=$(gh pr list --head "$RELEASE_BRANCH" --state open --json number --jq '.[0].number // empty')
+            gh pr create --base main --head "$RELEASE_BRANCH" --title "$TITLE" --body-file "$BODY_FILE"
           fi
 
           {
             echo "## Release PR"
-            echo "#$PR_NUMBER を作成・更新しました。"
-            echo '```'
-            echo "$RELEASE_PLAN"
-            echo '```'
+            echo "v$VERSION の Release PR を作成/更新しました。"
           } >> "$GITHUB_STEP_SUMMARY"
 
       # pnpm version -r で作られた (ledger に記録された) バージョンだけを publish 対象にする。
@@ -99,12 +118,15 @@ jobs:
         run: |
           NAME=$(jq -r '.name' package.json)
           VERSION=$(jq -r '.version' package.json)
+          echo "name=$NAME" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
           SHOULD_PUBLISH=false
           REASON=""
           if ! grep -qF "$NAME@$VERSION:" .changeset/ledger.yaml 2>/dev/null; then
             REASON="ledger に記録されていないバージョン"
           elif [ -z "$(pnpm view "$NAME" name 2>/dev/null || true)" ]; then
-            REASON="npm 上にパッケージが存在しない (初回リリースは手動で pnpm publish する)"
+            REASON="npm 上にパッケージが存在しない (初回リリースは手動で publish する)"
           elif [ -n "$(pnpm view "$NAME@$VERSION" version 2>/dev/null || true)" ]; then
             REASON="公開済み"
           else
@@ -130,19 +152,47 @@ jobs:
         with:
           persist-credentials: false
 
-      # キャッシュ汚染を避けるため publish ジョブでは依存キャッシュを使わない
       - uses: voidzero-dev/setup-vp@cab1ab9eaff52d4857875f4f2c016e36af8f2c76 # v1.22.0
+        with:
+          node-version: "26"
+          run-install: false
 
-      # ビルドは prepublishOnly で実行される。Trusted Publishing では provenance が自動で付与される
-      - name: Publish
-        run: pnpm -r publish --report-summary
+      - name: Install dependencies
+        run: vp install --frozen-lockfile
 
-      - name: Report published packages
-        if: always()
+      # OIDC (trusted publishing) でステージング登録する。provenance も自動付与される。
+      # 2FA は不要だが、実際に npm 上で公開されるにはメンテナによる承認
+      # (pnpm stage approve / npmjs.com) が別途必要。ビルドは prepublishOnly で実行される。
+      - name: Stage publish to npm
+        run: pnpm stage publish --access public --provenance --no-git-checks
+
+  github-release:
+    needs: [version, publish]
+    runs-on: ubuntu-slim
+    timeout-minutes: 5
+    permissions:
+      contents: write # git タグと GitHub Release の作成
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NAME: ${{ needs.version.outputs.name }}
+          VERSION: ${{ needs.version.outputs.version }}
         run: |
-          echo "## Published packages" >> "$GITHUB_STEP_SUMMARY"
-          if [ -f pnpm-publish-summary.json ]; then
-            jq -r '.publishedPackages[] | "- `\(.name)@\(.version)`"' pnpm-publish-summary.json >> "$GITHUB_STEP_SUMMARY"
-          else
-            echo "(none)" >> "$GITHUB_STEP_SUMMARY"
-          fi
+          gh release create "v$VERSION" \
+            --target "$GITHUB_SHA" \
+            --title "v$VERSION" \
+            --notes-file ".changeset/changelogs/$NAME@$VERSION.md"
+
+          {
+            echo "## Staged for publishing"
+            echo "v$VERSION を npm にステージング登録し、GitHub Release を作成しました。"
+            echo
+            echo "**npm 上ではまだ非公開です。** 公開するにはメンテナが以下のいずれかで承認 (2FA) してください:"
+            echo "- npmjs.com のパッケージページから承認する"
+            echo "- ローカルで \`pnpm stage approve $NAME@$VERSION\` を実行する"
+          } >> "$GITHUB_STEP_SUMMARY"
