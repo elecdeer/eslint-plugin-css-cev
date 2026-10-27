@@ -53,5 +53,8 @@
     "@eslint/css": ">=1.0.0",
     "eslint": ">=9.15.0"
   },
+  "engines": {
+    "node": "^20.19.0 || ^22.13.0 || >=24"
+  },
   "packageManager": "pnpm@11.13.1"
 }
