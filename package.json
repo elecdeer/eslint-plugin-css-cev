@@ -1,6 +1,6 @@
 {
   "name": "eslint-plugin-css-cev",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "description": "ESLint plugin enforcing the CEV (Component / Element / Variant) CSS architecture for @eslint/css",
   "keywords": [
     "cev",
