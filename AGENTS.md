@@ -35,3 +35,4 @@ release. Add a tool name to select part of the graph. For example, run
 - Versioning uses pnpm's built-in release management (`pnpm change` / `pnpm version -r`), not the Changesets CLI.
 - For any change that affects the published package, record a change intent before pushing: `pnpm change --bump <patch|minor|major> --summary "<changelog entry>" eslint-plugin-css-cev`.
 - On push to `main`, `.github/workflows/release.yml` opens/updates the `release/next` PR from pending intents; merging it publishes to npm via Trusted Publishing.
+- The release workflow skips publishing while the package does not exist on npm yet; the first release has to be published manually with `pnpm publish` from `main`, after which the npm Trusted Publisher for `release.yml` can be configured.

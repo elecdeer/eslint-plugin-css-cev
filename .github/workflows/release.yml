@@ -91,6 +91,8 @@ jobs:
 
       # pnpm version -r で作られた (ledger に記録された) バージョンだけを publish 対象にする。
       # 初期バージョンなど ledger にないバージョンを CI が勝手に publish しないようにするため。
+      # また Trusted Publisher は npm 上に既存のパッケージにしか設定できないので、
+      # パッケージ自体が未公開 (初回リリース) の場合は CI では publish せず手動 publish に任せる。
       - name: Check whether to publish
         id: publish-check
         if: steps.apply.outputs.changed == 'false'
@@ -98,15 +100,21 @@ jobs:
           NAME=$(jq -r '.name' package.json)
           VERSION=$(jq -r '.version' package.json)
           SHOULD_PUBLISH=false
-          if grep -qF "$NAME@$VERSION:" .changeset/ledger.yaml 2>/dev/null; then
-            PUBLISHED=$(pnpm view "$NAME@$VERSION" version 2>/dev/null || true)
-            if [ -z "$PUBLISHED" ]; then
-              SHOULD_PUBLISH=true
-            fi
+          REASON=""
+          if ! grep -qF "$NAME@$VERSION:" .changeset/ledger.yaml 2>/dev/null; then
+            REASON="ledger に記録されていないバージョン"
+          elif [ -z "$(pnpm view "$NAME" name 2>/dev/null || true)" ]; then
+            REASON="npm 上にパッケージが存在しない (初回リリースは手動で pnpm publish する)"
+          elif [ -n "$(pnpm view "$NAME@$VERSION" version 2>/dev/null || true)" ]; then
+            REASON="公開済み"
+          else
+            SHOULD_PUBLISH=true
           fi
           echo "should-publish=$SHOULD_PUBLISH" >> "$GITHUB_OUTPUT"
-          echo "## Publish check" >> "$GITHUB_STEP_SUMMARY"
-          echo "\`$NAME@$VERSION\`: should-publish=$SHOULD_PUBLISH" >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo "## Publish check"
+            echo "\`$NAME@$VERSION\`: should-publish=$SHOULD_PUBLISH ${REASON:+($REASON)}"
+          } >> "$GITHUB_STEP_SUMMARY"
 
   publish:
     needs: version
